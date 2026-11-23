@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>土気と稲毛海岸 冬の朝</title>
+<style>
+  html, body { margin: 0; background: #0A1424; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+/* =========================================================
+   土気と稲毛海岸：冬の朝の気温はなぜ違う？（59秒・16:9）
+   drawFrame(t) で t 秒の1コマを描く。数値はすべて依頼データのまま。
+   ========================================================= */
+const W = 1920, H = 1080, DURATION = 59;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const FONT = '"Noto Sans CJK JP", "Noto Sans JP", "IPAGothic", sans-serif';
+
+const C = {
+  text: '#EEF3F9', sub: '#A9B8CC', dim: '#6F829C',
+  cold: '#4DB2FF', coldL: '#A6DAFF', coldD: '#1F6FC0',
+  warm: '#FF8A4C', warmL: '#FFC394', warmD: '#D9572A',
+  hi: '#FFD866', ir: '#FF6F91', vapor: '#DDEBFF',
+  gray: '#8E9BB0', grayL: '#B9C3D2',
+};
+
+/* ---------- 小道具 ---------- */
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const eout = k => 1 - Math.pow(1 - k, 3);
+const eback = k => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); };
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const frac = x => x - Math.floor(x);
+const fmt = (v, d = 1) => (v < 0 ? '−' : '') + Math.abs(v).toFixed(d);
+
+function A(a, fn) { if (a <= 0.001) return; ctx.save(); ctx.globalAlpha *= Math.min(1, a); fn(); ctx.restore(); }
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function poly(pts, close = true) {
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  if (close) ctx.closePath();
+}
+function txt(s, x, y, o = {}) {
+  ctx.save();
+  ctx.globalAlpha *= (o.a ?? 1);
+  ctx.font = `${o.w || 400} ${o.s || 32}px ${FONT}`;
+  ctx.textAlign = o.al || 'left'; ctx.textBaseline = o.bl || 'middle';
+  if (o.stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = o.stroke; ctx.strokeStyle = o.sc || 'rgba(6,12,24,0.85)'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = o.c || C.text; ctx.fillText(s, x, y);
+  ctx.restore();
+}
+function tw(s, size, w = 400) { ctx.save(); ctx.font = `${w} ${size}px ${FONT}`; const m = ctx.measureText(s).width; ctx.restore(); return m; }
+function hex2rgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function mix(a, b, k) { const A1 = hex2rgb(a), B1 = hex2rgb(b); return `rgb(${A1.map((v, i) => Math.round(lerp(v, B1[i], k))).join(',')})`; }
+function rgba(h, a) { const [r, g, b] = hex2rgb(h); return `rgba(${r},${g},${b},${a})`; }
+function radial(x, y, r, col, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, rgba(col, a)); g.addColorStop(1, rgba(col, 0));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+}
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+function arrowHead(x, y, ang, size, col) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(size * 0.55, 0); ctx.lineTo(-size * 0.75, size * 0.62); ctx.lineTo(-size * 0.75, -size * 0.62); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+/* 波線の矢印（赤外線・熱など） */
+function wavy(x0, y0, x1, y1, amp, waves, phase, col, lw, head = true) {
+  const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy); if (L < 2) return;
+  const ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  const N = 48, endS = head ? 1 - (lw * 2.2) / L : 1;
+  for (let i = 0; i <= N; i++) {
+    const s = (i / N) * endS;
+    const env = Math.min(1, s * 5, (1 - s) * 5);
+    const off = Math.sin(s * waves * Math.PI * 2 + phase) * amp * env;
+    const px = x0 + dx * s + nx * off, py = y0 + dy * s + ny * off;
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  }
+  ctx.stroke(); ctx.restore();
+  if (head) arrowHead(x1 - ux * lw * 0.6, y1 - uy * lw * 0.6, Math.atan2(uy, ux), lw * 3.0, col);
+}
+/* 下から上へ流れ続ける波線矢印 */
+function rising(t, x, yBot, yTop, len, speed, offset, col, lw, amp, drift = 0, alpha = 1) {
+  const p = frac(t * speed + offset);
+  const travel = (yBot - yTop) - len;
+  const tail = yBot - travel * p, headY = tail - len;
+  const a = Math.sin(Math.PI * p) * alpha;
+  A(a, () => wavy(x + drift * p, tail, x + drift * (p + 0.15), headY, amp, 1.6, t * 7 + offset * 9, col, lw));
+}
+function thermo(x, yb, h, level, col, a = 1) {
+  A(a, () => {
+    const tw2 = 18, br = 22, top = yb - h;
+    ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(232,240,250,0.92)';
+    rr(x - tw2 / 2, top, tw2, h, tw2 / 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, yb, br, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#16253B';
+    rr(x - tw2 / 2, top, tw2, h, tw2 / 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, yb, br, 0, Math.PI * 2); ctx.fill();
+    const lt = yb - br - (h - br - 12) * clamp(level);
+    ctx.fillStyle = col;
+    rr(x - tw2 / 2 + 4, lt, tw2 - 8, yb - lt, (tw2 - 8) / 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, yb, br - 6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(232,240,250,0.5)'; ctx.lineWidth = 2;
+    for (let i = 1; i < 5; i++) { const yy = yb - br - (h - br - 12) * i / 5; ctx.beginPath(); ctx.moveTo(x + tw2 / 2 + 5, yy); ctx.lineTo(x + tw2 / 2 + 13, yy); ctx.stroke(); }
+  });
+}
+function moon(x, y, r, a = 1) {
+  A(a, () => {
+    radial(x, y, r * 3.2, '#FFF0C8', 0.30);
+    ctx.fillStyle = '#FFF3CF'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(214,196,150,0.40)';
+    [[-0.3, -0.2, 0.18], [0.25, 0.15, 0.22], [-0.05, 0.42, 0.12]].forEach(c => { ctx.beginPath(); ctx.arc(x + c[0] * r, y + c[1] * r, c[2] * r, 0, Math.PI * 2); ctx.fill(); });
+  });
+}
+const STARS = (() => { const r = rng(11); return Array.from({ length: 110 }, () => ({ x: r() * W, y: 110 + r() * 560, s: 0.7 + r() * 1.7, p: r() * 6.28 })); })();
+function stars(t, a, ymax = 650, x0 = 0, x1 = W) {
+  ctx.save(); ctx.fillStyle = '#DCE8FF';
+  for (const s of STARS) {
+    if (s.y > ymax || s.x < x0 || s.x > x1) continue;
+    const k = 0.55 + 0.45 * Math.sin(t * 2.1 + s.p);
+    ctx.globalAlpha = a * k * 0.75; ctx.beginPath(); ctx.arc(s.x, s.y, s.s, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+function panel(x, y, w, h, stroke = 'rgba(160,185,215,0.22)', fill = 'rgba(21,38,63,0.72)') {
+  rr(x, y, w, h, 22); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke();
+}
+function chip(x, y, s, col, size = 26) {
+  const w = tw(s, size, 700) + 34, h = size + 20;
+  rr(x, y - h / 2, w, h, h / 2); ctx.fillStyle = rgba(col, 0.16); ctx.fill(); ctx.strokeStyle = rgba(col, 0.75); ctx.lineWidth = 2; ctx.stroke();
+  txt(s, x + 17, y + 1, { s: size, w: 700, c: col });
+  return w;
+}
+function pin(x, y, col, r, ringT = null) {
+  if (ringT !== null) { const ph = frac(ringT * 0.7); A(1 - ph, () => { ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, r + ph * 30, 0, Math.PI * 2); ctx.stroke(); }); }
+  ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#0A1424'; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, r * 0.36, 0, Math.PI * 2); ctx.fill();
+}
+/* 点線の曲線矢印（途中まで描ける） */
+function curveArrow(p, q, bend, prog, col, lw = 3) {
+  if (prog <= 0) return;
+  const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2;
+  const dx = q[0] - p[0], dy = q[1] - p[1], L = Math.hypot(dx, dy);
+  const cx = mx - dy / L * bend, cy = my + dx / L * bend;
+  const pt = s => [(1 - s) * (1 - s) * p[0] + 2 * (1 - s) * s * cx + s * s * q[0], (1 - s) * (1 - s) * p[1] + 2 * (1 - s) * s * cy + s * s * q[1]];
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.setLineDash([9, 7]); ctx.lineCap = 'round';
+  ctx.beginPath(); const N = 40;
+  for (let i = 0; i <= N; i++) { const s = (i / N) * prog * 0.93; const [x, y] = pt(s); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.stroke(); ctx.restore();
+  if (prog > 0.95) { const a = pt(0.93), b = pt(0.86); arrowHead(a[0], a[1], Math.atan2(a[1] - b[1], a[0] - b[0]), lw * 4, col); }
+  return pt(0.5);
+}
+
+/* =========================================================
+   地図（模式図）：経度・緯度はおおよその値
+   ========================================================= */
+const COAST = [[139.85, 35.80], [139.97, 35.690], [140.000, 35.672], [140.025, 35.655], [140.045, 35.640], [140.065, 35.627], [140.085, 35.612], [140.098, 35.598], [140.108, 35.580], [140.112, 35.560], [140.105, 35.545], [140.085, 35.528], [140.060, 35.505], [140.035, 35.480], [140.010, 35.455], [139.975, 35.430], [139.94, 35.39], [139.85, 35.30]];
+const CITY = [[140.025, 35.655], [140.045, 35.640], [140.065, 35.627], [140.085, 35.612], [140.098, 35.598], [140.108, 35.580], [140.112, 35.560], [140.105, 35.545], [140.130, 35.540], [140.160, 35.528], [140.195, 35.515], [140.230, 35.500], [140.265, 35.488], [140.300, 35.492], [140.325, 35.505], [140.318, 35.530], [140.300, 35.560], [140.285, 35.595], [140.270, 35.625], [140.255, 35.655], [140.230, 35.675], [140.195, 35.685], [140.160, 35.690], [140.125, 35.705], [140.090, 35.705], [140.060, 35.690], [140.040, 35.675]];
+const PTS = { inage: [140.072, 35.632], toke: [140.268, 35.522], chiba: [140.103, 35.602], sakura: [140.222, 35.722], mobara: [140.293, 35.428] };
+
+function mapT(t) {
+  const intro = eout(P(t, 0, 1.2));
+  const m = ease(P(t, 8.3, 9.2));
+  return {
+    cx: lerp(960, 330, m), cy: lerp(525, 578, m),
+    k: lerp(lerp(1760, 1900, intro), 1000, m),
+    a: intro * (1 - P(t, 12.9, 13.3)), m,
+  };
+}
+const proj = (p, T) => [T.cx + (p[0] - 140.18) * 0.8135 * T.k, T.cy - (p[1] - 35.575) * T.k];
+
+function drawMap(t) {
+  const T = mapT(t); if (T.a <= 0.001) return;
+  A(T.a, () => {
+    const pr = p => proj(p, T), sc = T.k / 1900;
+    const [x0, y0] = pr([139.95, 35.75]), [x1, y1] = pr([140.41, 35.40]);
+    const big = 1 - P(t, 8.15, 8.5), mini = P(t, 9.0, 9.4);
+    // 地図の土台
+    ctx.save(); rr(x0, y0, x1 - x0, y1 - y0, 20 * sc + 4); ctx.fillStyle = '#1C2C44'; ctx.fill(); ctx.clip();
+    poly(COAST.map(pr)); ctx.fillStyle = '#0E2136'; ctx.fill();
+    const ip = pr(PTS.inage), tp = pr(PTS.toke), cp = pr(PTS.chiba), sp = pr(PTS.sakura);
+    A(big, () => { radial(ip[0], ip[1], 250 * sc, C.warm, 0.32); radial(tp[0], tp[1], 250 * sc, C.cold, 0.30); });
+    A(mini, () => { radial(cp[0], cp[1], 120 * sc + 30, C.warm, 0.30); radial(sp[0], sp[1], 120 * sc + 30, C.cold, 0.30); });
+    poly(COAST.slice(1, -2).map(pr), false); ctx.strokeStyle = 'rgba(255,170,120,0.85)'; ctx.lineWidth = 3 * sc + 1; ctx.stroke();
+    poly(CITY.map(pr)); ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
+    ctx.setLineDash([10 * sc + 2, 7 * sc + 2]); ctx.strokeStyle = 'rgba(220,232,248,0.78)'; ctx.lineWidth = 2.6 * sc + 0.8; ctx.stroke(); ctx.setLineDash([]);
+    ctx.restore();
+    rr(x0, y0, x1 - x0, y1 - y0, 20 * sc + 4); ctx.strokeStyle = 'rgba(160,185,215,0.35)'; ctx.lineWidth = 2; ctx.stroke();
+
+    // ---- 大きい地図のラベル（つかみ） ----
+    A(big, () => {
+      A(P(t, 1.2, 1.8), () => txt('東京湾', ...pr([140.0, 35.53]), { s: 32, w: 700, c: '#7F9BBE', al: 'center' }));
+      A(P(t, 0.6, 1.2) * (1 - P(t, 6.0, 6.4)), () => txt('千葉市', ...pr([140.195, 35.612]), { s: 36, w: 700, c: 'rgba(230,240,250,0.5)', al: 'center' }));
+      A(P(t, 0.8, 1.4), () => {
+        const nx = x1 - 46, ny = y0 + 62;
+        ctx.strokeStyle = C.sub; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(nx, ny + 26); ctx.lineTo(nx, ny - 14); ctx.stroke();
+        arrowHead(nx, ny - 18, -Math.PI / 2, 14, C.sub); txt('N', nx, ny + 46, { s: 24, w: 700, c: C.sub, al: 'center' });
+        txt('模式図（位置はおおよそ）', x0 + 18, y1 - 22, { s: 20, c: C.dim });
+      });
+      // 稲毛海岸・土気のラベル
+      A(P(t, 1.3, 1.8), () => {
+        txt('稲毛海岸', ip[0] - 40, ip[1] - 58, { s: 44, w: 700, c: C.warmL, al: 'right', stroke: 6 });
+        txt('海沿い・美浜区', ip[0] - 40, ip[1] - 12, { s: 26, c: C.text, al: 'right', stroke: 5 });
+      });
+      A(P(t, 1.7, 2.2), () => {
+        txt('土気', tp[0] + 34, tp[1] - 14, { s: 44, w: 700, c: C.coldL, stroke: 6 });
+        txt('内陸の台地・緑区', tp[0] + 34, tp[1] + 32, { s: 26, c: C.text, stroke: 5 });
+      });
+      // 温度計（つかみ）
+      const ta = P(t, 2.2, 2.7) * (1 - P(t, 5.8, 6.2));
+      const lv = eout(P(t, 2.4, 3.6));
+      thermo(ip[0] - 260, ip[1] + 70, 150, lerp(0.15, 0.72, lv), C.warm, ta);
+      thermo(tp[0] + 300, tp[1] + 80, 150, lerp(0.15, 0.26, lv), C.cold, ta);
+      A(ta * P(t, 3.0, 3.4), () => txt('？', tp[0] + 345, tp[1] - 40, { s: 64, w: 700, c: C.coldL }));
+    });
+
+    // ---- 観測点（代用）----
+    const ca = P(t, 6.3, 6.7), sa = P(t, 6.6, 7.0), ma = P(t, 7.1, 7.5);
+    A(big, () => {
+      const ar1 = eout(P(t, 6.4, 7.1)), ar2 = eout(P(t, 6.7, 7.5));
+      const m1 = curveArrow([ip[0] + 6, ip[1] + 14], [cp[0] - 4, cp[1] - 16], -26, ar1, C.warmL, 3);
+      const m2 = curveArrow([tp[0] - 4, tp[1] - 20], [sp[0] + 6, sp[1] + 20], -60, ar2, C.coldL, 3);
+      A(P(t, 7.1, 7.4), () => { if (m2) txt('代用', m2[0] + 18, m2[1], { s: 26, w: 700, c: C.coldL, stroke: 5 }); });
+      A(P(t, 6.9, 7.2), () => { if (m1) txt('代用', m1[0] + 22, m1[1] - 6, { s: 26, w: 700, c: C.warmL, stroke: 5 }); });
+      A(ca, () => {
+        txt('千葉', cp[0] - 26, cp[1] + 40, { s: 34, w: 700, c: C.warm, al: 'right', stroke: 6 });
+        txt('中央区・東京湾岸', cp[0] - 26, cp[1] + 80, { s: 24, c: C.text, al: 'right', stroke: 5 });
+      });
+      A(sa, () => {
+        txt('佐倉', sp[0] + 30, sp[1] - 12, { s: 34, w: 700, c: C.cold, stroke: 6 });
+        txt('下総台地・内陸', sp[0] + 30, sp[1] + 26, { s: 24, c: C.text, stroke: 5 });
+      });
+      A(ma, () => txt('茂原（参考）', pr(PTS.mobara)[0] + 24, pr(PTS.mobara)[1], { s: 24, c: C.grayL, stroke: 5 }));
+      // 説明ボックス
+      A(P(t, 6.2, 6.7) * (1 - P(t, 8.0, 8.3)), () => {
+        panel(1370, 205, 490, 286);
+        txt('観測点がないので代用', 1400, 250, { s: 32, w: 700, c: C.hi });
+        txt('土気・稲毛海岸には', 1400, 300, { s: 26, c: C.sub });
+        txt('気象庁の観測点がありません', 1400, 336, { s: 26, c: C.sub });
+        ctx.fillStyle = C.warm; ctx.beginPath(); ctx.arc(1412, 398, 10, 0, 7); ctx.fill();
+        txt('千葉 ＝ 稲毛海岸の代わり', 1436, 398, { s: 28, w: 700 });
+        ctx.fillStyle = C.cold; ctx.beginPath(); ctx.arc(1412, 448, 10, 0, 7); ctx.fill();
+        txt('佐倉 ＝ 土気の代わり', 1436, 448, { s: 28, w: 700 });
+      });
+    });
+    // ---- 小さい地図のラベル ----
+    A(mini, () => {
+      txt('千葉', cp[0] - 20, cp[1] + 2, { s: 26, w: 700, c: C.warm, al: 'right', stroke: 5 });
+      txt('佐倉', sp[0] + 20, sp[1], { s: 26, w: 700, c: C.cold, stroke: 5 });
+      txt('茂原', pr(PTS.mobara)[0] + 18, pr(PTS.mobara)[1], { s: 22, c: C.grayL, stroke: 5 });
+      txt('観測点の位置（模式図）', x0, y1 + 26, { s: 20, c: C.dim });
+      // 凡例
+      const L = [[C.warm, '千葉（湾岸）', '稲毛海岸の代わり'], [C.cold, '佐倉（台地）', '土気の代わり'], [C.gray, '茂原', '参考']];
+      L.forEach((r, i) => {
+        const y = 196 + i * 62;
+        rr(x0, y - 14, 28, 28, 6); ctx.fillStyle = r[0]; ctx.fill();
+        txt(r[1], x0 + 42, y, { s: 28, w: 700 });
+        txt(r[2], x0 + 42 + tw(r[1], 28, 700) + 12, y + 2, { s: 22, c: C.sub });
+      });
+    });
+    // ピン
+    const popI = eback(P(t, 1.0, 1.5)), popT = eback(P(t, 1.4, 1.9));
+    const pr0 = 13 * sc + 4;
+    A(big * P(t, 1.0, 1.2), () => pin(ip[0], ip[1], C.warm, pr0 * popI, t));
+    A(big * P(t, 1.4, 1.6), () => pin(tp[0], tp[1], C.cold, pr0 * popT, t));
+    A(mini * 0.45, () => { pin(ip[0], ip[1], C.warmL, pr0 * 0.75); pin(tp[0], tp[1], C.coldL, pr0 * 0.75); });
+    A(ca, () => pin(cp[0], cp[1], C.warm, pr0 * eback(ca), big > 0.5 ? t : null));
+    A(sa, () => pin(sp[0], sp[1], C.cold, pr0 * eback(sa), big > 0.5 ? t : null));
+    A(ma, () => pin(...pr(PTS.mobara), C.gray, pr0 * 0.85 * eback(ma)));
+  });
+}
+
+/* =========================================================
+   棒グラフ（6〜13秒）
+   ========================================================= */
+function bar(cx, w, v, col, yOf) {
+  const y0 = yOf(0), y1 = yOf(v); if (Math.abs(y1 - y0) < 0.5) return;
+  const top = Math.min(y0, y1), h = Math.abs(y1 - y0);
+  const g = ctx.createLinearGradient(0, top, 0, top + h);
+  g.addColorStop(0, col); g.addColorStop(1, mix(col.length === 7 ? col : '#8E9BB0', '#0A1424', 0.25));
+  rr(cx - w / 2, top, w, h, Math.min(8, h / 2)); ctx.fillStyle = g; ctx.fill();
+}
+function valLabel(cx, v, yOf, col, size, bold = false) {
+  const y = v >= 0 ? yOf(v) - size * 0.78 : yOf(v) + size * 0.82;
+  txt(fmt(v), cx, y, { s: size, w: bold ? 700 : 400, c: col, al: 'center' });
+}
+function drawChart(t) {
+  const a = P(t, 8.7, 9.1) * (1 - P(t, 12.9, 13.3)); if (a <= 0.001) return;
+  A(a, () => {
+    const yOf = v => 590 - v * 62;
+    txt('冬（12〜2月）の日最低気温の平均', 640, 176, { s: 38, w: 700 });
+    txt('気象庁データ・単位℃', 1850, 180, { s: 24, c: C.sub, al: 'right' });
+    for (const v of [-2, 0, 2, 4, 6]) {
+      ctx.strokeStyle = v === 0 ? 'rgba(220,232,248,0.75)' : 'rgba(160,185,215,0.16)'; ctx.lineWidth = v === 0 ? 2.5 : 1.5;
+      ctx.beginPath(); ctx.moveTo(700, yOf(v)); ctx.lineTo(1610, yOf(v)); ctx.stroke();
+      txt(fmt(v, 0), 684, yOf(v), { s: 24, c: C.sub, al: 'right' });
+    }
+    const seasons = [['2023/24', 4.9, 0.5], ['2024/25', 3.8, -1.8], ['2025/26', 4.0, -0.7]];
+    seasons.forEach((s, i) => {
+      const cx = 815 + i * 210, t0 = 9.0 + i * 0.35, g = eout(P(t, t0, t0 + 0.6));
+      bar(cx - 34, 56, s[1] * g, C.warm, yOf); bar(cx + 34, 56, s[2] * g, C.cold, yOf);
+      A(P(t, t0 + 0.45, t0 + 0.75), () => { valLabel(cx - 34, s[1], yOf, C.warmL, 28); valLabel(cx + 34, s[2], yOf, C.coldL, 28); });
+      A(P(t, t0, t0 + 0.3), () => txt(s[0] + '冬', cx, yOf(-3) + 40, { s: 26, c: C.sub, al: 'center' }));
+    });
+    // 3年平均
+    const pa = P(t, 10.0, 10.4);
+    A(pa, () => { rr(1350, 204, 260, 640, 18); ctx.fillStyle = 'rgba(255,216,102,0.07)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,216,102,0.5)'; ctx.lineWidth = 2; ctx.stroke(); });
+    const g = eout(P(t, 10.2, 10.9));
+    bar(1420, 58, 4.3 * g, C.warm, yOf); bar(1480, 34, 1.7 * g, C.gray, yOf); bar(1540, 58, -0.7 * g, C.cold, yOf);
+    A(P(t, 10.7, 11.0), () => {
+      valLabel(1420, 4.3, yOf, C.warmL, 38, true); valLabel(1540, -0.7, yOf, C.coldL, 38, true);
+      txt('1.7', 1480, yOf(1.7) - 20, { s: 24, c: C.grayL, al: 'center' });
+      txt('茂原', 1480, yOf(1.7) - 50, { s: 20, c: C.grayL, al: 'center' });
+    });
+    A(pa, () => txt('3年平均', 1480, yOf(-3) + 40, { s: 30, w: 700, c: C.hi, al: 'center' }));
+    // 約5℃の差
+    const bp = ease(P(t, 10.9, 11.5));
+    A(bp, () => {
+      const ya = yOf(4.3), yb = yOf(-0.7), ym = (ya + yb) / 2;
+      ctx.strokeStyle = C.hi; ctx.lineWidth = 2.5; ctx.setLineDash([7, 7]);
+      ctx.beginPath(); ctx.moveTo(1452, ya); ctx.lineTo(1640, ya); ctx.moveTo(1572, yb); ctx.lineTo(1640, yb); ctx.stroke(); ctx.setLineDash([]);
+      ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(1630, ym - (ym - ya - 12) * bp); ctx.lineTo(1630, ym + (yb - ym - 12) * bp); ctx.stroke();
+      if (bp > 0.9) { arrowHead(1630, ya + 8, -Math.PI / 2, 14, C.hi); arrowHead(1630, yb - 8, Math.PI / 2, 14, C.hi); }
+    });
+    const lp = P(t, 11.2, 11.7);
+    A(lp, () => {
+      ctx.save(); ctx.translate(1652, 470); const s = eback(lp); ctx.scale(s, s);
+      radial(70, 10, 150, C.hi, 0.14 + 0.08 * Math.sin(t * 5));
+      txt('約5℃', 0, 0, { s: 68, w: 700, c: C.hi });
+      txt('の差', 6, 64, { s: 38, w: 700, c: C.hi });
+      ctx.restore();
+    });
+  });
+}
+
+/* =========================================================
+   差の比較と1日の気温変化（13〜18秒）
+   ========================================================= */
+function diffBar(x, y, w, h, glow) {
+  if (w < 1) return;
+  const g = ctx.createLinearGradient(x, 0, x + 600, 0);
+  g.addColorStop(0, C.warm); g.addColorStop(1, C.cold);
+  if (glow) { ctx.save(); ctx.shadowColor = rgba(C.hi, 0.55); ctx.shadowBlur = 26; }
+  rr(x, y, w, h, 12); ctx.fillStyle = g; ctx.fill();
+  if (glow) ctx.restore();
+}
+function dayCurve(h, mn, mx, a) {
+  if (h < 6) h += 24;
+  if (h <= 14) return mn + (mx - mn) * (1 - Math.cos(Math.PI * (h - 6) / 8)) / 2;
+  const s = (h - 14) / 16, g = (Math.exp(-a * s) - Math.exp(-a)) / (1 - Math.exp(-a));
+  return mn + (mx - mn) * g;
+}
+const chibaT = h => dayCurve(h, 4.3, 10.5, 2.0);
+const sakuraT = h => dayCurve(h, -0.7, 10.3, 3.2);
+function drawDiff(t) {
+  const a = P(t, 13.3, 13.7) * (1 - P(t, 17.85, 18.15)); if (a <= 0.001) return;
+  A(a, () => {
+    // 左：差の大きさ
+    panel(96, 160, 850, 720);
+    txt('千葉と佐倉の気温差', 136, 220, { s: 38, w: 700 });
+    const g1 = eout(P(t, 13.6, 14.3)), g2 = eout(P(t, 14.3, 15.3));
+    txt('1日の平均気温の差', 150, 340, { s: 30, c: C.sub });
+    diffBar(150, 372, 2.6 * 120 * g1, 62, false);
+    A(P(t, 14.1, 14.4), () => txt('約2.6℃', 150 + 312 + 26, 404, { s: 48, w: 700 }));
+    txt('朝の最低気温の差', 150, 530, { s: 30, w: 700, c: C.text });
+    diffBar(150, 562, 5 * 120 * g2, 62, true);
+    A(P(t, 15.1, 15.4), () => txt('約5℃', 150 + 600 + 26, 594, { s: 56, w: 700, c: C.hi }));
+    A(P(t, 16.2, 16.6), () => { txt('→ 差は夜に生まれる', 150, 760, { s: 40, w: 700, c: C.hi }); });
+
+    // 右：1日の気温の変化（イメージ）
+    panel(976, 160, 868, 720);
+    txt('1日の気温の変化', 1010, 220, { s: 36, w: 700 });
+    txt('（イメージ）', 1010 + tw('1日の気温の変化', 36, 700) + 6, 224, { s: 26, c: C.sub });
+    const X = h => 1070 + h / 24 * 730, Y = v => 735 - (v + 2) * 29;
+    const night = P(t, 16.2, 16.7);
+    [[0, 6.5], [17, 24]].forEach(([h0, h1]) => {
+      ctx.fillStyle = 'rgba(4,10,26,0.62)'; ctx.fillRect(X(h0), 285, X(h1) - X(h0), 450);
+      A(night, () => { ctx.fillStyle = rgba(C.hi, 0.07 + 0.03 * Math.sin(t * 6)); ctx.fillRect(X(h0), 285, X(h1) - X(h0), 450); });
+    });
+    txt('夜', X(3.25), 310, { s: 26, w: 700, c: C.sub, al: 'center' });
+    A(1 - P(t, 15.5, 15.9), () => txt('昼', X(11.75), 310, { s: 26, w: 700, c: C.sub, al: 'center' }));
+    A(P(t, 15.5, 15.9), () => txt('昼の差は小さい', X(11.75), 310, { s: 26, w: 700, c: C.text, al: 'center' }));
+    txt('夜', X(20.5), 310, { s: 26, w: 700, c: C.sub, al: 'center' });
+    ctx.strokeStyle = 'rgba(220,232,248,0.6)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(1070, 285); ctx.lineTo(1070, 735); ctx.lineTo(1800, 735); ctx.stroke();
+    [0, 6, 12, 18, 24].forEach(h => txt(h + '時', X(h), 762, { s: 22, c: C.sub, al: 'center' }));
+    txt('気温', 1056, 300, { s: 22, c: C.sub, al: 'right' });
+    // 夜の差を塗る
+    A(night, () => {
+      [[0, 6.6], [17, 24]].forEach(([h0, h1]) => {
+        ctx.beginPath();
+        for (let h = h0; h <= h1 + 1e-6; h += 0.1) ctx.lineTo(X(h), Y(chibaT(h)));
+        for (let h = h1; h >= h0 - 1e-6; h -= 0.1) ctx.lineTo(X(h), Y(sakuraT(h)));
+        ctx.closePath(); ctx.fillStyle = rgba(C.hi, 0.22); ctx.fill();
+      });
+      moon(X(21.3), 360, 16);
+    });
+    const prog = P(t, 13.7, 15.4);
+    [[chibaT, C.warm], [sakuraT, C.cold]].forEach(([f, col]) => {
+      if (prog <= 0) return;
+      ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+      for (let h = 0; h <= 24 * prog + 1e-6; h += 0.1) { const x = X(h), y = Y(f(h)); h ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+      ctx.stroke();
+    });
+    A(P(t, 13.8, 14.2), () => {
+      ctx.strokeStyle = C.warm; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(1500, 220); ctx.lineTo(1540, 220); ctx.stroke();
+      txt('千葉', 1550, 220, { s: 24, w: 700, c: C.warm });
+      ctx.strokeStyle = C.cold; ctx.beginPath(); ctx.moveTo(1640, 220); ctx.lineTo(1680, 220); ctx.stroke();
+      txt('佐倉', 1690, 220, { s: 24, w: 700, c: C.cold });
+    });
+    // 明け方の差
+    A(P(t, 15.2, 15.6), () => {
+      const x = X(6), ya = Y(4.3), yb = Y(-0.7);
+      ctx.strokeStyle = C.hi; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, ya + 14); ctx.lineTo(x, yb - 14); ctx.stroke();
+      arrowHead(x, ya + 10, -Math.PI / 2, 14, C.hi); arrowHead(x, yb - 10, Math.PI / 2, 14, C.hi);
+      txt('約5℃', x - 16, (ya + yb) / 2, { s: 32, w: 700, c: C.hi, al: 'right', stroke: 6 });
+    });
+  });
+}
+
+/* =========================================================
+   理由① 放射冷却（18〜30秒）
+   ========================================================= */
+const VAPOR = (() => { const r = rng(5); return Array.from({ length: 28 }, () => ({ x: 300 + r() * 820, y: 250 + r() * 380, r: 3.5 + r() * 3.5, p: r() * 6.28 })); })();
+function trees(list, yg, col = '#0A1220') {
+  ctx.fillStyle = col;
+  list.forEach(([x, h]) => { ctx.beginPath(); ctx.moveTo(x - h * 0.32, yg + 2); ctx.lineTo(x, yg - h); ctx.lineTo(x + h * 0.32, yg + 2); ctx.closePath(); ctx.fill(); ctx.fillRect(x - 3, yg - 6, 6, 8); });
+}
+function drawRad(t) {
+  const a = P(t, 17.85, 18.15) * (1 - P(t, 29.85, 30.15)); if (a <= 0.001) return;
+  A(a, () => {
+    const yg = 720;
+    stars(t, 1, 640); moon(1780, 168, 34);
+    const cool = 0.6 * ease(P(t, 18.6, 24)) + 0.4 * ease(P(t, 26.6, 29.6));
+    // 水蒸気の粒
+    const va = 0.55 - 0.45 * ease(P(t, 26.4, 27.4));
+    A(va * P(t, 18.4, 19.0), () => { ctx.fillStyle = C.vapor; VAPOR.forEach(d => { ctx.beginPath(); ctx.arc(d.x + Math.sin(t * 0.8 + d.p) * 6, d.y + Math.cos(t * 0.6 + d.p) * 5, d.r, 0, 7); ctx.fill(); }); });
+    // 赤外線
+    const ia = P(t, 18.3, 18.9), boost = P(t, 26.6, 27.4);
+    [330, 470, 610, 750, 890, 1030].forEach((x, i) => {
+      for (let k = 0; k < 2; k++) rising(t, x, yg - 6, 175, 150, 0.42, i * 0.37 + k * 0.5, C.ir, 5 + boost, 9, 0, ia);
+    });
+    A(ia, () => { txt('宇宙へ', 680, 140, { s: 32, w: 700, c: C.ir }); arrowHead(680 + tw('宇宙へ', 32, 700) + 16, 140, -Math.PI / 2, 16, C.ir); });
+    A(P(t, 19.2, 19.6), () => { txt('赤外線', 1078, 430, { s: 32, w: 700, c: C.ir }); txt('（地面の熱）', 1074, 468, { s: 24, c: C.text }); });
+    // 冷たい空気の層（接地逆転層）
+    const hL = 120 * eout(P(t, 22.9, 25)) + 40 * ease(P(t, 26.6, 29.6));
+    if (hL > 1) {
+      const g = ctx.createLinearGradient(0, yg, 0, yg - hL);
+      g.addColorStop(0, rgba(C.cold, 0.7)); g.addColorStop(1, rgba(C.cold, 0));
+      ctx.fillStyle = g; ctx.fillRect(0, yg - hL, W, hL);
+    }
+    // 地面
+    const gc = mix('#4C4D57', '#1D4E86', cool);
+    const gg = ctx.createLinearGradient(0, yg, 0, H); gg.addColorStop(0, gc); gg.addColorStop(1, '#0B1322');
+    ctx.fillStyle = gg; ctx.fillRect(0, yg, W, H - yg);
+    ctx.strokeStyle = mix('#8A8C99', '#8FD0FF', cool); ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(0, yg); ctx.lineTo(W, yg); ctx.stroke();
+    trees([[1170, 66], [1212, 50], [1700, 60], [1742, 46], [1860, 70]], yg);
+    // 霜のきらめき
+    A(P(t, 27, 29.5), () => { ctx.fillStyle = '#E8F6FF'; for (let i = 0; i < 40; i++) { const x = (i * 97) % 1900 + 10; ctx.globalAlpha = 0.4 + 0.4 * Math.sin(t * 4 + i); ctx.fillRect(x, yg + 4 + (i % 3) * 3, 3, 3); } });
+    A(P(t, 23.2, 23.8), () => {
+      txt('接地逆転層', 70, yg - 72, { s: 32, w: 700, c: C.coldL, stroke: 6 });
+      txt('地面近くほど冷たい', 70, yg - 30, { s: 24, c: C.text, stroke: 5 });
+    });
+    // 条件
+    let cx = 64;
+    [['晴れ（雲がない）', C.coldL], ['風が弱い', C.coldL], ['冬の夜', C.coldL]].forEach(([s, col], i) => {
+      A(P(t, 18.2 + i * 0.25, 18.6 + i * 0.25), () => { cx += chip(cx, 150, s, col, 26) + 14; });
+      if (t < 18.2 + i * 0.25) cx += tw(s, 26, 700) + 48;
+    });
+    // 温度計
+    const lvl = 0.62 - 0.40 * cool;
+    thermo(1312, 690, 250, lvl, mix('#FFB07A', C.cold, Math.min(1, cool * 1.4)), P(t, 18.4, 18.9));
+    A(P(t, 18.4, 18.9), () => txt('地面付近', 1312, 408, { s: 24, c: C.text, al: 'center' }));
+    A(P(t, 27.4, 27.8), () => { txt('さらに冷える', 1312, 370, { s: 28, w: 700, c: C.coldL, al: 'center' }); });
+    // 高さと気温（はめ込み図）
+    A(P(t, 22.9, 23.4), () => {
+      panel(1420, 262, 446, 396);
+      txt('高さと気温', 1446, 300, { s: 28, w: 700 });
+      const ox = 1470, oy = 612;
+      ctx.fillStyle = rgba(C.cold, 0.18); ctx.fillRect(ox, 512, 370, oy - 512);
+      ctx.strokeStyle = 'rgba(220,232,248,0.6)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(ox, 340); ctx.lineTo(ox, oy); ctx.lineTo(1846, oy); ctx.stroke();
+      arrowHead(ox, 336, -Math.PI / 2, 11, 'rgba(220,232,248,0.8)'); arrowHead(1850, oy, 0, 11, 'rgba(220,232,248,0.8)');
+      txt('高さ', ox + 12, 346, { s: 22, c: C.sub });
+      txt('気温（右ほど暖かい）', 1846, oy + 26, { s: 20, c: C.sub, al: 'right' });
+      const pts = [[1530, oy], [1700, 512], [1610, 362]];
+      const lp = P(t, 23.2, 24.4), seg1 = Math.hypot(170, 100), seg2 = Math.hypot(90, 150), tot = seg1 + seg2;
+      let d = lp * tot;
+      ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.strokeStyle = C.cold; ctx.beginPath(); ctx.moveTo(...pts[0]);
+      const k1 = Math.min(1, d / seg1); ctx.lineTo(lerp(pts[0][0], pts[1][0], k1), lerp(pts[0][1], pts[1][1], k1)); ctx.stroke();
+      if (d > seg1) { const k2 = Math.min(1, (d - seg1) / seg2); ctx.strokeStyle = C.coldL; ctx.beginPath(); ctx.moveTo(...pts[1]); ctx.lineTo(lerp(pts[1][0], pts[2][0], k2), lerp(pts[1][1], pts[2][1], k2)); ctx.stroke(); }
+      A(P(t, 24.0, 24.4), () => { txt('逆転層', 1714, 556, { s: 24, w: 700, c: C.coldL }); txt('下ほど冷たい', 1714, 586, { s: 20, c: C.text }); });
+      A(P(t, 24.3, 24.7), () => txt('上空：上ほど寒い', 1662, 420, { s: 20, c: C.sub }));
+    });
+    // 乾いた空気
+    A(P(t, 26.4, 26.9), () => {
+      panel(330, 210, 720, 116, rgba(C.coldL, 0.6), 'rgba(10,20,38,0.9)');
+      txt('乾いた空気＝水蒸気が少ない', 360, 248, { s: 32, w: 700, c: C.coldL });
+      txt('→ 温室効果が弱く、熱がさらに逃げる', 360, 294, { s: 28, c: C.text });
+    });
+  });
+}
+
+/* =========================================================
+   理由② 海の熱容量（30〜40秒）
+   ========================================================= */
+const VP = (() => { const r = rng(21); return Array.from({ length: 42 }, () => ({ x: 60 + r() * 920, o: r(), s: 0.16 + r() * 0.12, r: 3.5 + r() * 3.5 })); })();
+const BLD2 = [[1180, 80, 100], [1272, 70, 150], [1356, 90, 76], [1460, 74, 172], [1548, 86, 118], [1648, 70, 150], [1732, 84, 92], [1830, 70, 128]];
+function windows(x, y, w, h, seed, col = '#FFD27A') {
+  const r = rng(seed);
+  for (let yy = y + 14; yy < y + h - 14; yy += 22) for (let xx = x + 10; xx < x + w - 14; xx += 18) { if (r() < 0.45) { ctx.fillStyle = rgba(col, 0.55 + r() * 0.35); ctx.fillRect(xx, yy, 8, 10); } }
+}
+function drawSea(t) {
+  const a = P(t, 29.85, 30.15) * (1 - P(t, 39.85, 40.15)); if (a <= 0.001) return;
+  A(a, () => {
+    const ys = 720, yl = 700, xc = 1010;
+    stars(t, 0.7, 560);
+    // 暖かい空気（海の上から湾岸へ）
+    const da = ease(P(t, 35.2, 37.2));
+    A(1, () => radial(700, ys, lerp(560, 980, da), C.warm, lerp(0.16, 0.30, da)));
+    // 海
+    const sg = ctx.createLinearGradient(0, ys, 0, H);
+    sg.addColorStop(0, rgba(C.warm, 0.75 + 0.1 * Math.sin(t * 2.2))); sg.addColorStop(0.35, '#7A3A2A'); sg.addColorStop(1, '#1A1B2A');
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.moveTo(0, ys);
+    for (let x = 0; x <= xc + 20; x += 10) ctx.lineTo(x, ys + Math.sin(x * 0.02 + t * 2.4) * 5);
+    ctx.lineTo(xc + 20, H); ctx.lineTo(0, H); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = rgba(C.warmL, 0.9); ctx.lineWidth = 3; ctx.beginPath();
+    for (let x = 0; x <= xc + 20; x += 10) { const y = ys + Math.sin(x * 0.02 + t * 2.4) * 5; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke();
+    // 陸（湾岸）
+    poly([[xc - 30, H], [xc - 30, ys + 10], [xc + 40, yl], [W, yl], [W, H]]); ctx.fillStyle = '#28324A'; ctx.fill();
+    ctx.strokeStyle = '#59647C'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(xc - 30, ys + 10); ctx.lineTo(xc + 40, yl); ctx.lineTo(W, yl); ctx.stroke();
+    BLD2.forEach(([x, w, h], i) => { ctx.fillStyle = '#141E30'; ctx.fillRect(x, yl - h, w, h); ctx.strokeStyle = 'rgba(120,140,170,0.35)'; ctx.lineWidth = 2; ctx.strokeRect(x, yl - h, w, h); windows(x, yl - h, w, h, 40 + i); });
+    A(1, () => txt('湾岸の街', 1520, 752, { s: 26, c: C.sub, al: 'center' }));
+    // 熱の矢印
+    const ha = P(t, 30.4, 31.0);
+    [120, 270, 420, 570, 720, 870].forEach((x, i) => {
+      for (let k = 0; k < 2; k++) rising(t, x, ys - 8, 250, 130, 0.36, i * 0.31 + k * 0.5, C.warm, 5, 8, 70, ha);
+    });
+    // 水蒸気
+    A(P(t, 30.8, 31.6), () => {
+      ctx.fillStyle = C.vapor;
+      VP.forEach(v => { const p = frac(t * v.s + v.o), y = ys - 10 - p * 430, x = v.x + p * 120 + Math.sin(t * 2 + v.o * 9) * 6; ctx.globalAlpha = Math.sin(Math.PI * p) * 0.75; ctx.beginPath(); ctx.arc(x, y, v.r, 0, 7); ctx.fill(); });
+    });
+    A(P(t, 31.0, 31.5), () => { txt('熱', 200, 470, { s: 36, w: 700, c: C.warmL, stroke: 6 }); txt('水蒸気', 640, 560, { s: 30, w: 700, c: C.vapor, stroke: 6 }); });
+    // 海のラベル
+    A(P(t, 30.2, 30.7), () => txt('冬の東京湾', 500, 800, { s: 42, w: 700, c: C.text, al: 'center', stroke: 6 }));
+    A(P(t, 32.8, 33.3), () => txt('陸より暖かい', 500, 856, { s: 34, w: 700, c: C.warmL, al: 'center', stroke: 6 }));
+    // 湾岸の温度計
+    const ta = P(t, 30.4, 30.9);
+    thermo(1092, 676, 210, 0.58 + 0.04 * da, C.warm, ta);
+    A(ta, () => txt('湾岸の夜', 1092, 440, { s: 24, c: C.text, al: 'center', stroke: 5 }));
+    A(P(t, 35.8, 36.3), () => txt('冷えにくい', 1092, 404, { s: 30, w: 700, c: C.warmL, al: 'center', stroke: 6 }));
+    // 熱容量の説明
+    A(P(t, 30.3, 30.9), () => {
+      panel(1176, 140, 690, 230);
+      txt('熱容量（熱をためる力）', 1206, 184, { s: 30, w: 700, c: C.warmL });
+      const g = eout(P(t, 30.7, 31.7));
+      txt('海', 1210, 252, { s: 32, w: 700 });
+      rr(1262, 234, 320 * g, 36, 10); ctx.fillStyle = C.warm; ctx.fill();
+      A(P(t, 31.4, 31.8), () => txt('大きい → 冷めにくい', 1598, 252, { s: 26, c: C.text }));
+      txt('陸', 1210, 318, { s: 32, w: 700 });
+      rr(1262, 300, 110 * g, 36, 10); ctx.fillStyle = C.cold; ctx.fill();
+      A(P(t, 31.6, 32.0), () => txt('小さい → 冷めやすい', 1388, 318, { s: 26, c: C.text }));
+    });
+  });
+}
+
+/* =========================================================
+   理由③ ヒートアイランドと冷気湖（40〜52秒）
+   ========================================================= */
+const BLD = [[110, 80, 230], [204, 100, 330], [318, 70, 180], [402, 110, 290], [526, 90, 250], [630, 80, 200], [724, 100, 310], [838, 75, 160]];
+const TERR = [[962, 650], [1190, 650], [1262, 690], [1330, 760], [1382, 790], [1500, 790], [1552, 760], [1622, 690], [1700, 650], [1920, 650], [1920, 1080], [962, 1080]];
+function smoothPath(pts, close = true) { // 上の稜線だけをなめらかに（末尾2点は底辺）
+  const top = pts.slice(0, pts.length - 2);
+  ctx.beginPath(); ctx.moveTo(top[0][0], top[0][1]);
+  for (let i = 1; i < top.length - 1; i++) { const xc = (top[i][0] + top[i + 1][0]) / 2, yc = (top[i][1] + top[i + 1][1]) / 2; ctx.quadraticCurveTo(top[i][0], top[i][1], xc, yc); }
+  ctx.lineTo(top[top.length - 1][0], top[top.length - 1][1]);
+  if (!close) return;
+  ctx.lineTo(pts[pts.length - 2][0], pts[pts.length - 2][1]); ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]); ctx.closePath();
+}
+function along(path, s) { // 折れ線上の位置
+  const L = []; let tot = 0; for (let i = 1; i < path.length; i++) { const d = Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]); L.push(d); tot += d; }
+  let d = s * tot; for (let i = 0; i < L.length; i++) { if (d <= L[i]) { const k = d / L[i]; return [lerp(path[i][0], path[i + 1][0], k), lerp(path[i][1], path[i + 1][1], k), Math.atan2(path[i + 1][1] - path[i][1], path[i + 1][0] - path[i][0])]; } d -= L[i]; }
+  const n = path.length - 1; return [path[n][0], path[n][1], 0];
+}
+const FLOW_L = [[1060, 626], [1190, 630], [1262, 668], [1330, 738], [1400, 770]];
+const FLOW_R = [[1840, 626], [1700, 630], [1622, 668], [1552, 738], [1482, 770]];
+function drawHeat(t) {
+  const a = P(t, 39.85, 40.15) * (1 - P(t, 51.85, 52.15)); if (a <= 0.001) return;
+  A(a, () => {
+    const dim = 0.7 * ease(P(t, 47.2, 47.8));
+    A(1, () => {
+      // ---- 左：湾岸のヒートアイランド ----
+      ctx.save(); ctx.beginPath(); ctx.rect(0, 0, 958, H); ctx.clip();
+      ctx.fillStyle = rgba(C.warm, 0.05); ctx.fillRect(0, 0, 958, H);
+      stars(t, 0.5, 420, 0, 958);
+      const dome = eout(P(t, 40.2, 41.8));
+      radial(480, 800, lerp(200, 560, dome), C.warm, 0.34 * dome);
+      ctx.fillStyle = '#2A2F3F'; ctx.fillRect(0, 800, 958, H - 800);
+      ctx.strokeStyle = '#5E6477'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(0, 800); ctx.lineTo(958, 800); ctx.stroke();
+      BLD.forEach(([x, w, h], i) => { ctx.fillStyle = '#162033'; ctx.fillRect(x, 800 - h, w, h); ctx.strokeStyle = 'rgba(255,170,120,0.35)'; ctx.lineWidth = 2; ctx.strokeRect(x, 800 - h, w, h); windows(x, 800 - h, w, h, 90 + i); });
+      const ha = P(t, 40.4, 41.0);
+      BLD.forEach(([x, w, h], i) => rising(t, x + w / 2, 800 - h - 6, 800 - h - 150, 80, 0.5, i * 0.29, C.warm, 4, 6, 0, ha));
+      [196, 392, 518, 716].forEach((x, i) => rising(t, x + 4, 792, 600, 80, 0.55, 0.13 + i * 0.41, C.warmL, 3.5, 5, 0, ha));
+      A(P(t, 40.6, 41.0), () => txt('建物が熱をためる', 110, 290, { s: 28, w: 700, c: C.warmL, stroke: 5 }));
+      A(P(t, 41.2, 41.6), () => txt('排熱（冷暖房・車）', 520, 290, { s: 28, w: 700, c: C.warmL, stroke: 5 }));
+      A(1, () => txt('湾岸：ヒートアイランド', 479, 186, { s: 42, w: 700, c: C.warm, al: 'center' }));
+      ctx.restore();
+
+      // ---- 右：土気の台地と冷気湖 ----
+      ctx.save(); ctx.beginPath(); ctx.rect(962, 0, 958, H); ctx.clip();
+      ctx.fillStyle = rgba(C.cold, 0.05); ctx.fillRect(962, 0, 958, H);
+      stars(t, 0.6, 520, 962, W);
+      const yPool = lerp(794, 708, eout(P(t, 43.9, 47.4)));
+      const pg = ctx.createLinearGradient(0, yPool, 0, 800); pg.addColorStop(0, rgba(C.cold, 0.45)); pg.addColorStop(1, rgba(C.cold, 0.85));
+      ctx.fillStyle = pg; ctx.fillRect(1180, yPool, 540, 820 - yPool);
+      ctx.strokeStyle = rgba(C.coldL, 0.8); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(1180, yPool); ctx.lineTo(1720, yPool); ctx.stroke();
+      smoothPath(TERR); ctx.fillStyle = '#21334F'; ctx.fill(); smoothPath(TERR, false); ctx.strokeStyle = '#6F8BB0'; ctx.lineWidth = 3; ctx.stroke();
+      trees([[1010, 52], [1046, 40], [1120, 48], [1780, 50], [1820, 40], [1880, 54]], 650, '#0B1424');
+      txt('台地', 1080, 690, { s: 26, w: 700, c: C.sub, al: 'center' });
+      txt('台地', 1810, 690, { s: 26, w: 700, c: C.sub, al: 'center' });
+      txt('谷津（浅い谷）', 1441, 836, { s: 26, w: 700, c: C.sub, al: 'center' });
+      // 冷気の流れ
+      const fa = P(t, 43.8, 44.3);
+      A(fa, () => {
+        [FLOW_L, FLOW_R].forEach((path, j) => {
+          for (let i = 0; i < 4; i++) {
+            const s = frac(t * 0.38 + i / 4 + j * 0.13), [x, y, ang] = along(path, s);
+            A(Math.sin(Math.PI * s), () => { ctx.strokeStyle = C.coldL; ctx.lineWidth = 5; ctx.lineCap = 'round'; const b = along(path, Math.max(0, s - 0.16)); ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(x, y); ctx.stroke(); arrowHead(x, y, ang, 15, C.coldL); });
+          }
+        });
+        txt('重い冷気が谷へ流れ込む', 1441, 568, { s: 30, w: 700, c: C.coldL, al: 'center', stroke: 5 });
+      });
+      A(P(t, 45.2, 45.7), () => txt('冷気湖', 1441, (yPool + 790) / 2 + 2, { s: 36, w: 700, c: '#FFFFFF', al: 'center', stroke: 6, sc: rgba(C.coldD, 0.9) }));
+      A(1, () => txt('土気：冷気湖', 1441, 186, { s: 42, w: 700, c: C.cold, al: 'center' }));
+      ctx.restore();
+      // 仕切り線
+      const dg = ctx.createLinearGradient(0, 130, 0, 900); dg.addColorStop(0, 'rgba(255,255,255,0)'); dg.addColorStop(0.5, 'rgba(255,255,255,0.35)'); dg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = dg; ctx.fillRect(959, 130, 2, 770);
+    });
+    if (dim > 0) { ctx.fillStyle = `rgba(8,16,30,${dim})`; ctx.fillRect(0, 0, W, H); }
+    // ---- 標高差の補足 ----
+    const ea = P(t, 47.3, 47.8);
+    A(ea, () => {
+      ctx.strokeStyle = C.hi; ctx.lineWidth = 2.5; ctx.setLineDash([8, 7]);
+      ctx.beginPath(); ctx.moveTo(620, 800); ctx.lineTo(1000, 800); ctx.moveTo(920, 650); ctx.lineTo(1190, 650); ctx.stroke(); ctx.setLineDash([]);
+      const k = ease(P(t, 47.4, 48.0));
+      ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(960, 725 - 63 * k); ctx.lineTo(960, 725 + 63 * k); ctx.stroke();
+      if (k > 0.9) { arrowHead(960, 658, -Math.PI / 2, 14, C.hi); arrowHead(960, 792, Math.PI / 2, 14, C.hi); }
+      txt('標高差', 984, 706, { s: 26, w: 700, c: C.hi, stroke: 5 });
+      txt('約80m', 984, 744, { s: 34, w: 700, c: C.hi, stroke: 5 });
+      txt('湾岸', 780, 828, { s: 24, c: C.text, al: 'center', stroke: 5 });
+      txt('土気の台地', 1080, 622, { s: 24, c: C.text, al: 'center', stroke: 5 });
+    });
+    A(P(t, 47.7, 48.2), () => {
+      panel(470, 236, 980, 300, rgba(C.hi, 0.55), 'rgba(12,22,40,0.94)');
+      txt('標高差（約80m）の影響は？', 506, 286, { s: 34, w: 700 });
+      const g = eout(P(t, 48.2, 49.2));
+      txt('標高による差', 506, 360, { s: 28, c: C.text });
+      rr(790, 342, 45 * g + 2, 36, 8); ctx.fillStyle = '#C9D4E3'; ctx.fill();
+      A(P(t, 48.6, 48.9), () => txt('約0.5℃', 852, 360, { s: 34, w: 700 }));
+      txt('朝の最低気温の差', 506, 428, { s: 28, c: C.text });
+      const g2 = ctx.createLinearGradient(790, 0, 1240, 0); g2.addColorStop(0, C.warm); g2.addColorStop(1, C.cold);
+      rr(790, 410, 450 * g + 2, 36, 8); ctx.fillStyle = g2; ctx.fill();
+      A(P(t, 49.0, 49.3), () => txt('約5℃', 1256, 428, { s: 34, w: 700, c: C.hi }));
+      A(P(t, 49.4, 49.8), () => txt('→ 標高の影響は小さい', 506, 494, { s: 32, w: 700, c: C.hi }));
+    });
+  });
+}
+
+/* =========================================================
+   まとめ（52〜59秒）
+   ========================================================= */
+function drawSum(t) {
+  const a = P(t, 51.85, 52.15); if (a <= 0.001) return;
+  A(a, () => {
+    const s1 = eout(P(t, 52.0, 52.8));
+    // 左カード（内陸）
+    ctx.save(); ctx.translate(-80 * (1 - s1), 0); ctx.globalAlpha *= s1;
+    panel(110, 160, 750, 600, rgba(C.cold, 0.7), rgba(C.cold, 0.10));
+    txt('土気（内陸の台地）', 485, 212, { s: 36, w: 700, c: C.coldL, al: 'center' });
+    // アイコン：月・赤外線・谷にたまる冷気
+    moon(330, 300, 24);
+    ctx.fillStyle = rgba(C.cold, 0.75); ctx.beginPath(); ctx.moveTo(420, 418); ctx.lineTo(560, 418); ctx.lineTo(560, 452); ctx.lineTo(420, 452); ctx.fill();
+    poly([[240, 400], [380, 400], [440, 450], [540, 450], [600, 400], [730, 400], [730, 470], [240, 470]]); ctx.fillStyle = '#2B4466'; ctx.fill();
+    ctx.strokeStyle = '#7FA3CF'; ctx.lineWidth = 3; poly([[240, 400], [380, 400], [440, 450], [540, 450], [600, 400], [730, 400]], false); ctx.stroke();
+    [300, 650].forEach((x, i) => rising(t, x, 392, 250, 80, 0.5, i * 0.5, C.ir, 4, 6));
+    txt('夜に冷える陸', 485, 532, { s: 58, w: 700, c: C.cold, al: 'center' });
+    A(P(t, 53.2, 53.6), () => txt('放射冷却・冷気湖', 485, 600, { s: 30, c: C.text, al: 'center' }));
+    ctx.strokeStyle = rgba(C.cold, 0.4); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(160, 645); ctx.lineTo(810, 645); ctx.stroke();
+    A(P(t, 54.2, 54.6), () => { txt('冬日※ 内陸の市原・成田は 年51〜65日', 485, 700, { s: 28, w: 700, c: C.coldL, al: 'center' }); });
+    ctx.restore();
+    // 右カード（湾岸）
+    ctx.save(); ctx.translate(80 * (1 - s1), 0); ctx.globalAlpha *= s1;
+    panel(1060, 160, 750, 600, rgba(C.warm, 0.7), rgba(C.warm, 0.10));
+    txt('稲毛海岸（湾岸）', 1435, 212, { s: 36, w: 700, c: C.warmL, al: 'center' });
+    radial(1435, 440, 210, C.warm, 0.28);
+    ctx.fillStyle = rgba(C.warm, 0.8); ctx.beginPath(); ctx.moveTo(1190, 470);
+    for (let x = 1190; x <= 1400; x += 8) ctx.lineTo(x, 430 + Math.sin(x * 0.05 + t * 2.4) * 5);
+    ctx.lineTo(1400, 470); ctx.closePath(); ctx.fill();
+    [[1420, 50, 110], [1478, 44, 150], [1530, 56, 90], [1594, 46, 126]].forEach(([x, w, h], i) => { ctx.fillStyle = '#162033'; ctx.fillRect(x, 470 - h, w, h); ctx.strokeStyle = 'rgba(255,170,120,0.5)'; ctx.lineWidth = 2; ctx.strokeRect(x, 470 - h, w, h); windows(x, 470 - h, w, h, 300 + i); });
+    ctx.fillStyle = '#3A3240'; ctx.fillRect(1400, 470, 280, 8);
+    [1250, 1340].forEach((x, i) => rising(t, x, 425, 270, 70, 0.5, i * 0.5, C.warm, 4, 6));
+    [1500, 1615].forEach((x, i) => rising(t, x, 330, 250, 50, 0.5, 0.25 + i * 0.5, C.warmL, 3.5, 5));
+    txt('冷えにくい海と街', 1435, 532, { s: 58, w: 700, c: C.warm, al: 'center' });
+    A(P(t, 53.4, 53.8), () => txt('海の熱容量・ヒートアイランド', 1435, 600, { s: 30, c: C.text, al: 'center' }));
+    ctx.strokeStyle = rgba(C.warm, 0.4); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(1110, 645); ctx.lineTo(1760, 645); ctx.stroke();
+    A(P(t, 54.4, 54.8), () => { txt('冬日※ 湾岸の美浜区は 年1〜32日', 1435, 700, { s: 28, w: 700, c: C.warmL, al: 'center' }); });
+    ctx.restore();
+    // 中央バッジ
+    const bp = P(t, 52.7, 53.2);
+    A(bp, () => {
+      ctx.save(); ctx.translate(960, 462); const s = eback(bp); ctx.scale(s, s);
+      radial(0, 0, 170, C.hi, 0.18 + 0.06 * Math.sin(t * 4));
+      ctx.fillStyle = '#0E1A2C'; ctx.beginPath(); ctx.arc(0, 0, 96, 0, 7); ctx.fill();
+      const g = ctx.createLinearGradient(-96, 0, 96, 0); g.addColorStop(0, C.cold); g.addColorStop(1, C.warm);
+      ctx.strokeStyle = g; ctx.lineWidth = 6; ctx.stroke();
+      txt('朝の差', 0, -34, { s: 24, w: 700, c: C.sub, al: 'center' });
+      txt('約5℃', 0, 18, { s: 56, w: 700, c: C.hi, al: 'center' });
+      ctx.restore();
+    });
+    // 出典
+    A(P(t, 55.0, 55.5), () => {
+      txt('※冬日＝最低気温が0℃未満の日（千葉県の調査より）', 960, 800, { s: 24, c: C.sub, al: 'center' });
+      const s1t = '出典：気象庁 過去の気象データ', s2t = '（千葉・佐倉・茂原の観測値）';
+      const w1 = tw(s1t, 34, 700), w2 = tw(s2t, 24), x = 960 - (w1 + w2 + 10) / 2;
+      txt(s1t, x, 852, { s: 34, w: 700 });
+      txt(s2t, x + w1 + 10, 855, { s: 24, c: C.sub });
+    });
+  });
+}
+
+/* =========================================================
+   見出し・進行バー・字幕
+   ========================================================= */
+const HEAD = [
+  [0, 6, 'Q', '冬の朝、どっちが寒い？', '#3A5478'],
+  [6, 18, 'データ', '気象庁の観測値で比べる', '#3A5478'],
+  [18, 30, '理由①', '放射冷却', C.coldD],
+  [30, 40, '理由②', '海の熱容量', C.warmD],
+  [40, 52, '理由③', 'ヒートアイランドと冷気湖', '#7A5AA8'],
+  [52, 59, 'まとめ', '朝の約5℃の差が生まれるしくみ', '#3A5478'],
+];
+function drawHeader(t) {
+  for (const [a, b, tag, title, col] of HEAD) {
+    const al = Math.min(a === 0 ? P(t, 0.1, 0.6) : P(t, a - 0.15, a + 0.15), b >= 59 ? 1 : 1 - P(t, b - 0.15, b + 0.15));
+    A(al, () => {
+      const w = tw(tag, 26, 700) + 36;
+      rr(60, 42, w, 50, 25); ctx.fillStyle = col; ctx.fill();
+      txt(tag, 60 + w / 2, 68, { s: 26, w: 700, al: 'center' });
+      txt(title, 60 + w + 18, 68, { s: 36, w: 700 });
+    });
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fillRect(0, 0, W, 6);
+  const g = ctx.createLinearGradient(0, 0, W, 0); g.addColorStop(0, C.warm); g.addColorStop(1, C.cold);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W * clamp(t / DURATION), 6);
+}
+const SUBS = [
+  [0.10, 3.35, ['同じ千葉市なのに', '冬の朝は 土気の方が寒い？']],
+  [3.35, 6.00, ['海沿いの稲毛海岸と', '比べてみよう']],
+  [6.00, 9.90, ['観測点のある 台地の佐倉と', '湾岸の千葉で比べると']],
+  [9.90, 13.30, ['冬の朝の最低気温は', '約5℃も違います']],
+  [13.30, 16.20, ['平均気温では', '約2.6℃差なのに']],
+  [16.20, 18.00, ['差は 夜に生まれます']],
+  [18.00, 19.20, ['放射冷却']],
+  [19.20, 22.90, ['晴れた夜 地面は赤外線を', '宇宙へ逃がして冷えます']],
+  [22.90, 26.40, ['風が弱いと', '地表に接地逆転層ができます']],
+  [26.40, 30.00, ['乾いた空気は温室効果が弱く', 'さらに冷えます']],
+  [30.00, 32.70, ['熱容量の大きい海は', '冷めにくく']],
+  [32.70, 35.30, ['冬の東京湾は', '陸より暖かい']],
+  [35.30, 40.00, ['海からの熱と水蒸気が', '湾岸の夜を冷えにくくします']],
+  [40.00, 43.80, ['湾岸は 建物や排熱で暖まる', 'ヒートアイランド']],
+  [43.80, 47.20, ['土気では 谷津に', '冷気が流れ込み 冷気湖に']],
+  [47.20, 52.00, ['標高差 約80mの影響は', '0.5℃ほどと小さめ']],
+  [52.00, 55.00, ['夜に冷える陸', '冷えにくい海と街']],
+  [55.00, 59.00, ['この差が', '朝の約5℃を生みます']],
+];
+function drawSubs(t) {
+  const cur = SUBS.find(s => t >= s[0] && t < s[1]); if (!cur) return;
+  const lines = cur[2], size = 48, lh = 66;
+  const a = cur[0] < 0.5 ? P(t, cur[0], cur[0] + 0.25) : 1;
+  A(a, () => {
+    const wmax = Math.max(...lines.map(l => tw(l, size, 700)));
+    const bh = lines.length * lh + 26, by = 1046 - bh;
+    rr(960 - wmax / 2 - 34, by, wmax + 68, bh, 16); ctx.fillStyle = 'rgba(4,9,18,0.78)'; ctx.fill();
+    lines.forEach((l, i) => txt(l, 960, by + 13 + lh / 2 + i * lh + 2, { s: size, w: 700, al: 'center' }));
+  });
+}
+
+/* ---------- 1コマ描画 ---------- */
+function drawFrame(t, opts = {}) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#08111F'); bg.addColorStop(0.65, '#0E1C32'); bg.addColorStop(1, '#0B1628');
+  ctx.globalAlpha = 1; ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  drawMap(t); drawChart(t); drawDiff(t); drawRad(t); drawSea(t); drawHeat(t); drawSum(t);
+  drawHeader(t);
+  if (opts.subs !== false) drawSubs(t);
+}
+window.drawFrame = drawFrame; window.SUBS = SUBS; window.DURATION = DURATION;
+window.ready = (async () => {
+  await document.fonts.load(`400 40px "Noto Sans CJK JP"`, 'あ');
+  await document.fonts.load(`700 40px "Noto Sans CJK JP"`, 'あ');
+  const q = new URLSearchParams(location.search);
+  drawFrame(parseFloat(q.get('t') || '0'));
+  return true;
+})();
+</script>
+</body>
+</html>
